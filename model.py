@@ -98,7 +98,7 @@ class CandidatePenaltyCrossEntropyCriterion(nn.Module):
         negative_targets = negative_targets.scatter_(2, ctx_cands, 1)
         return negative_targets[..., 1:]
 
-    def forward(self, logits, target, return_ce=False):
+    def forward(self, logits, target, return_ce=False, instance_weights=None):
         """Loss which helps model not to predict already appeared tokens.
         Args:
             logits (tensor):
@@ -124,14 +124,14 @@ class CandidatePenaltyCrossEntropyCriterion(nn.Module):
             ignore_index=self.ignore_index,
             reduction='none',
         )
-        mle_loss = mle_loss.sum()
+        mle_loss = mle_loss.sum() if instance_weights is None else (mle_loss*instance_weights).sum()
 
         # -- custom loss
         # Maximize (1 - p(x_nt)) for negative target tokens x_nt (equivalently minimize -log(1-p(x_nt)))
         # - compute loss
         one_minus_probs = torch.clamp((1.0 - lprobs.exp()), min=1e-5)
         custom_loss = -torch.log(one_minus_probs) * negative_targets
-        custom_loss = custom_loss.sum()
+        custom_loss = custom_loss.sum() if instance_weights is None else (torch.sum(custom_loss, axis=-1).contiguous().view(-1)*instance_weights).sum()
 
         # Scale loss
         loss = mle_loss + self.rank_alpha * custom_loss
@@ -148,14 +148,15 @@ class LabelSmoothingCrossEntropyLoss(nn.Module):
         self.confidence = 1.0 - smoothing
         self.smoothing = smoothing
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, instance_weights=None):
         pred = pred.log_softmax(-1)
         with torch.no_grad():
             # true_dist = pred.data.clone()
             true_dist = torch.zeros_like(pred)
             true_dist.fill_(self.smoothing / (pred.size(-1) - 1))
             true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
-        loss = torch.sum(-true_dist * pred * (target != -100).unsqueeze(-1))
+        loss = torch.squeeze(torch.sum(-true_dist * pred * (target != -100).unsqueeze(-1), dim=-1))*instance_weights
+        loss = torch.sum(loss)
         return loss / (target != -100).sum()
 
 
@@ -164,9 +165,14 @@ class LabelSmoothingBCEWithLogitsLoss(nn.BCEWithLogitsLoss):
         super().__init__()
         self.smoothing = smoothing
 
-    def forward(self, input, target, weight=None):
+    def forward(self, input, target, weight=None, instance_weights=None):
         smoothed_labels = target.mul(1 - 2 * self.smoothing).add_(self.smoothing)
-        return torch.nn.functional.binary_cross_entropy_with_logits(input, smoothed_labels, weight)
+        if instance_weights is None:
+            return torch.nn.functional.binary_cross_entropy_with_logits(input, smoothed_labels, weight)
+        else:
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(input, smoothed_labels, weight, reduction="none")
+            weighted_loss = loss*instance_weights
+            return torch.mean(weighted_loss)
 
 
 class AuGPTModel(transformers.GPT2PreTrainedModel):
@@ -206,6 +212,7 @@ class AuGPTModel(transformers.GPT2PreTrainedModel):
                 use_cache=None,
                 output_attentions=None,
                 output_hidden_states=None,
+                instance_weights=None,
                 **kwargs
                 ):
 
@@ -247,6 +254,14 @@ class AuGPTModel(transformers.GPT2PreTrainedModel):
             # Auxiliary tasks
             aux_criterion = LabelSmoothingBCEWithLogitsLoss(self.config.summary_label_smoothing)
             consistency_loss = aux_criterion(consistency_logits, consistency_labels)
+        
+        def prepare_instance_wts(instance_weights, logits_size):
+            if instance_weights is not None:
+                instance_weights = torch.unsqueeze(instance_weights, -1).expand(-1, logits_size)
+                instance_weights = torch.squeeze(instance_weights)
+                return instance_weights.contiguous().view(-1)
+            else:
+                return None
 
         belief_loss, response_loss = None, None
         if belief_labels is not None:
@@ -262,12 +277,13 @@ class AuGPTModel(transformers.GPT2PreTrainedModel):
 
             if self.config.response_loss == 'ce':
                 response_ce = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_response_labels.view(-1))
-                response_loss = response_ce
+                response_loss = torch.mean(response_ce) if instance_weights is None else torch.mean(response_ce*prepare_instance_wts(instance_weights, shift_logits.size(1)))
+            
             elif self.config.response_loss == 'unlikelihood':
                 candidate_ce_fct = CandidatePenaltyCrossEntropyCriterion()
                 response_loss, response_ce = candidate_ce_fct(
                     shift_logits,
-                    shift_response_labels, return_ce=True)
+                    shift_response_labels, return_ce=True, instance_weights=prepare_instance_wts(instance_weights, shift_logits.size(1)))
             else:
                 raise ValueError(f'Response loss {self.config.response_loss} is not supported')
 

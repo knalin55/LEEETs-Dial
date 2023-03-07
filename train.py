@@ -48,6 +48,9 @@ class Trainer:
         self.optimizer, self.scheduler, self.global_step = None, None, 0
         self.epoch = None
         self.wandb_runid = None
+        self.instance_weights = args.instance_weights
+        self.sacrebleu = datasets.load_metric("sacrebleu", experiment_id=f"{args.response_loss}-{args.instance_weights}")
+        self.dir_path = args.dir_path
 
     def _initialize_logging(self):
         if self.is_master():
@@ -349,10 +352,32 @@ class Trainer:
                 # We need to release memory here, therefore the closure
                 def _train_step(batch):
                     self.model.train()
+                    instance_weights = None
                     batch = {k: v.to(self.args.device) for k, v in batch.items()}
+                    
+                    def get_instance_weights(batch):
+                        instance_weights = []
+                        for input_ids in batch["input_ids"]:
+                            input_text = self.tokenizer.decode(
+                                input_ids).lower().split("user :")[-1] 
+                            user_input, other = input_text.split("=>")
+                            system_input = input_text.split('<|eokb|>')[-1].split(self.tokenizer.eos_token)[0]
+                            results = self.sacrebleu.compute(predictions=[user_input.strip()], references=[[system_input]])
+                            #instance_weights.append(10/(0.5 + np.exp(0.1373*(results["score"]-4))))
+                            #instance_weights.append(10/(1 + np.exp(0.8*(-results["precisions"][0]+18.1473))) + 0.1)
+                            if self.instance_weights == "simple":
+                                if results["precisions"][0] <= 25:
+                                    instance_weights.append(1.0)
+                                else:
+                                    instance_weights.append(10.0)
+                            else:
+                                
+                                instance_weights.append(10/(1 + np.exp(0.8*(-results["precisions"][0]+18.1473))) + 0.1)
+                    
+                    if self.instance_weights is not None: instance_weights = get_instance_weights(batch)
 
-                    def forward(batch):
-                        output = self.model(**batch)
+                    def forward(batch, instance_weights=instance_weights,):
+                        output = self.model(**batch, instance_weights=instance_weights,)
                         belief_loss, response_loss, response_ce, consistency_loss = output[:4]
                         loss = belief_loss + response_loss + consistency_loss
                         return loss, output[:6]
@@ -458,6 +483,7 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--validation-steps', type=int, default=2000)
     parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
+    parser.add_argument('--instance_weights', choices=['mod_sigmoid', 'simple'], default=None)
     parser.add_argument('--clean-samples', action='store_true')
     parser.add_argument('--restrict-domains', action='store_true')
     parser.add_argument('--backtranslations', type=str, default='none')

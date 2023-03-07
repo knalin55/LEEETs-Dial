@@ -1,7 +1,13 @@
 # AuGPT
 ![tests](https://github.com/ufal/augpt/workflows/tests/badge.svg)
 ## Update 07.03.2023
-Added Instance Weighting to improve user-system dialogue alignment
+Added Instance Weighing to improve user-system dialogue alignment
+
+Usage:
+```bash
+./train_multiwoz.py --instance_weights simple
+```
+Evaluation results can be found at [Google Doc](https://docs.google.com/document/d/1iQB1YWr3wMO8aEB08BUYBqiLh0KreYjyO4EHnb395Bo/edit?usp=sharing)
 
 ## Getting started
 Start with creating a python 3.7 venv and installing requirements.txt. Python 3.8 is **not supported** by ConvLab-2. Also,
