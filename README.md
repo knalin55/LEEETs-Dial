@@ -5,7 +5,7 @@ Added Instance Weighing to improve user-system dialogue alignment
 
 Usage:
 ```bash
-./train_multiwoz.py --train-dataset multiwoz-2.1-train --dev-dataset multiwoz-2.1-val --model jkulhanek/augpt-bigdata --backtranslations latest --response-loss unlikelihood --epochs 10 --fp16 --clean-samples --instance_weights simple
+./train_multiwoz.py --instance_weights simple
 ```
 Evaluation results can be found at [Google Doc](https://docs.google.com/document/d/1iQB1YWr3wMO8aEB08BUYBqiLh0KreYjyO4EHnb395Bo/edit?usp=sharing)
 
