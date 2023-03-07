@@ -4,6 +4,7 @@ import logging
 import os
 import argparse
 import transformers
+import datasets
 import torch
 from torch.nn.parallel import DistributedDataParallel
 from torchvision.transforms import Compose as ComposeTransformation
@@ -488,6 +489,7 @@ def parse_args():
     parser.add_argument('--restrict-domains', action='store_true')
     parser.add_argument('--backtranslations', type=str, default='none')
     parser.add_argument('--epochs', default=10, type=int)
+    parser.add_argument('--dir_path', default=None, type=str)
 
     # Passed by the launch script
     local_rank_default = int(os.environ['LOCAL_RANK']) if 'LOCAL_RANK' in os.environ else -1
