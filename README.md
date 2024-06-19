@@ -23,7 +23,7 @@ Don't forget to cite our paper if you use our work.
     abstract = "Linguistic entrainment, or alignment, represents a phenomenon where linguistic patterns employed by conversational participants converge to one another. While entrainment has been shown to produce a more natural user experience, most dialogue systems do not have any provisions for it. In this work, we introduce methods for achieving dialogue entrainment in a GPT-2-based end-to-end task-oriented dialogue system through the utilization of shared vocabulary. We experiment with training instance weighting, entrainment-specific loss, and additional conditioning to generate responses that align with the user. We demonstrate that all three approaches produce significantly better entrainment than the base, non-entrainment-optimized model, as confirmed by both automated and manual evaluation metrics.",
 }
 ```
-
+[Link to the paper](https://aclanthology.org/2024.findings-naacl.46/)
 ## Getting started
 Start with creating a python 3.7 venv and installing requirements.txt. Python 3.8 is **not supported** by ConvLab-2. Also,
 newer version of transformers is unfortunatelly not supported by ConvLab-2, therefore you need to install the legacy
