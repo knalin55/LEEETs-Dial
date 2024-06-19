@@ -10,7 +10,6 @@ from train import Trainer, parse_args, setup_logging  # noqa:E402
 from generate import generate_predictions  # noqa:E402
 from data.evaluation.multiwoz import MultiWozEvaluator, compute_bleu_remove_reference  # noqa: E402
 from data import load_dataset  # noqa:E402
-import data.evaluation.convlab  # noqa:E402
 from evaluation_utils import compute_delexicalized_bleu  # noqa:E402
 from data.utils import wrap_dataset_with_cache  # noqa:E402
 
