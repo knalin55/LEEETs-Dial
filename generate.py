@@ -14,7 +14,7 @@ from utils import pull_model, setup_logging
 from pipelines import AuGPTConversation, get_context_from_conversation
 import transformers
 from tqdm import tqdm
-
+import nltk
 
 def conversation_to_sample(conversation: AuGPTConversation):
     user = conversation.past_user_inputs
@@ -53,7 +53,7 @@ def format_samples(samples):
         sample = dataclasses.replace(sample, context=[])
         sample = add_labels(sample)
         formatted.append('=>' + sample.belief + '<|eob|>' + sample.database +
-                         '<|eokb|>' + sample.response + '<|endoftext|>')
+                         '<|eokb|>' + sample.response[0] + '<|endoftext|>')
     return formatted
 
 
@@ -155,6 +155,8 @@ if __name__ == '__main__':
     parser.add_argument('--oracle-belief', action='store_true')
     parser.add_argument('--oracle-db', action='store_true')
     parser.add_argument('--wandb', action='store_true')
+    parser.add_argument('--rerank', action='store_true')
+    parser.add_argument('--add_keyword', choices=['lexicons', 'pos_tags'], default=None)
     args = parser.parse_args()
     setup_logging()
     logger = logging.getLogger()
@@ -165,7 +167,9 @@ if __name__ == '__main__':
         args = argparse.Namespace(**wandb.config)
 
     model_name = pull_model(args.model)
-    pipeline_kwargs = dict(lexicalizer=None)
+    pipeline_kwargs = dict(lexicalizer=args.model)
+    pipeline_kwargs['add_keyword'] = args.add_keyword
+    pipeline_kwargs['rerank'] = args.rerank
     if args.oracle_db:
         pipeline_kwargs['database'] = None
     pipeline = transformers.pipeline('augpt-conversational', model_name, device=0 if torch.cuda.is_available() else -1, **pipeline_kwargs)
