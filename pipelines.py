@@ -8,7 +8,7 @@ from collections import OrderedDict
 from model import ModelPredictor
 from data import BeliefParser
 from utils import AutoDatabase, AutoLexicalizer
-
+from copy import deepcopy
 
 logger = logging.getLogger()
 
@@ -155,6 +155,7 @@ class AuGPTConversation(Conversation):
         self.raw_response = None
         self.oracle_belief = None
         self.oracle_database_results = None
+        self.keywords = None
 
     def add_user_input(self, *args, **kwargs):
         super().add_user_input(*args, **kwargs)
@@ -163,6 +164,7 @@ class AuGPTConversation(Conversation):
         self.raw_response = None
         self.oracle_belief = None
         self.oracle_database_results = None
+        self.keywords = None
 
 
 class AuGPTConversationalPipeline(transformers.Pipeline):
@@ -194,15 +196,17 @@ class AuGPTConversationalPipeline(transformers.Pipeline):
         conversational_pipeline([conversation_1, conversation_2])
     """
 
-    def __init__(self, lexicalizer=None, database=None, *args, **kwargs):
+    def __init__(self, lexicalizer=None, database=None, add_keyword=False, rerank=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.lexicalizer = lexicalizer
         if isinstance(lexicalizer, str):
+            print("loading lexicalizer")
             self.lexicalizer = AutoLexicalizer.load(lexicalizer)
         self.database = database
         if isinstance(database, str):
             self.database = AutoDatabase.load(database)
-        self.predictor = ModelPredictor(self.model, self.tokenizer, device=self.device)
+        
+        self.predictor = ModelPredictor(self.model, self.tokenizer, device=self.device, add_keyword=add_keyword, rerank=rerank)
         self.parse_belief = BeliefParser()
 
     def __call__(self, conversations: Union[AuGPTConversation, Conversation, List[Union[AuGPTConversation, Conversation]]]):
@@ -244,20 +248,45 @@ class AuGPTConversationalPipeline(transformers.Pipeline):
         with self.device_placement():
             contexts = AuGPTConversationalPipeline._get_contexts_from_conversations(conversations)
             original_belief_strs = self.predictor.predict_belief(contexts)
+                       
             oracle_beliefs = [getattr(x, 'oracle_belief', None) for x in conversations]
             oracle_dbs_results = [getattr(x, 'oracle_database_results', None) for x in conversations]
-            beliefs = [oracle_belief if oracle_belief is not None else self.parse_belief(belief_str)
-                       for oracle_belief, belief_str in zip(oracle_beliefs, original_belief_strs)]
-            dbs_results = [oracle_db if oracle_db is not None else self.database(bs, return_results=True)
-                           for oracle_db, bs in zip(oracle_dbs_results, beliefs)]
+            
+            beliefs = []
+            
+            for oracle_belief, belief_str in zip(oracle_beliefs, original_belief_strs):
+                if oracle_belief is not None:
+                    beliefs.append(oracle_belief)  
+                else:
+                    beliefs.append(self.parse_belief(belief_str))
+            
+            dbs_results = []
+            for oracle_db, bs in zip(oracle_dbs_results, beliefs):
+                if oracle_db is not None:
+                    dbs_results.append(oracle_db)
+                else:
+                    try:
+                        dbs_results.append(self.database(bs, return_results=True))
+                    except:
+                        bs["train"].pop("people")
+                        dbs_results.append(self.database(bs, return_results=True))
+                    #bs_copy = deepcopy(bs)
+                    #for domain, domain_bs in bs.items():
+                    #    columns = domain_bs.keys()
+                    #    for key in columns:
+                    #        if key not in self.database.query_domain(domain, "")[0].keys():
+                    #            bs_copy[domain].pop(key)
+                    #dbs_results.append(self.database(bs_copy, return_results=True))
+
+            
             dbs = [OrderedDict((k, x[0] if isinstance(x, tuple) else x) for k, x in db.items()) for db in dbs_results]
             delex_responses = self.predictor.predict_response(contexts, original_belief_strs, dbs)
-            responses = [self._lexicalise(response, db, bf, ctx)
+            responses = [self._lexicalise(response[0], db, bf, ctx)
                          for response, bf, db, ctx in zip(delex_responses, beliefs, dbs_results, contexts)]
-
+            keys = [key for res, key in delex_responses]
             output = []
-            for conversation_index, (conversation, response, belief, db, delex) \
-                    in enumerate(zip(conversations, responses, original_belief_strs, dbs_results, delex_responses)):
+            for conversation_index, (conversation, key, response, belief, db, delex) \
+                    in enumerate(zip(conversations, keys, responses, original_belief_strs, dbs_results, delex_responses)):
                 conversation.mark_processed()
                 conversation.append_response(response)
                 if hasattr(conversation, 'generated_belief'):
@@ -265,7 +294,9 @@ class AuGPTConversationalPipeline(transformers.Pipeline):
                 if hasattr(conversation, 'database_results'):
                     conversation.database_results = db
                 if hasattr(conversation, 'raw_response'):
-                    conversation.raw_response = delex
+                    conversation.raw_response = delex[0]
+                if hasattr(conversation, 'keywords'):
+                    conversation.keywords = key
                 output.append(conversation)
             if len(output) == 1:
                 return output[0]
