@@ -1,11 +1,27 @@
 # AuGPT
 ![tests](https://github.com/ufal/augpt/workflows/tests/badge.svg)
-## Update 07.03.2023
-Added Instance Weighing to improve user-system dialogue alignment
+## Update (LEEETs-Dial)
+Added several methods (Instance Weighting, User Likelihood Loss & Conditioning on Lexical Keywords) to improve user-system dialogue alignment.
+Head out to `experiments/experiments.md` to check their usage.
+Don't forget to cite our paper if you use our work. 
 
-Usage:
-```bash
-./train_multiwoz.py --instance_weights simple
+```
+@inproceedings{kumar-dusek-2024-leeets,
+    title = "{LEEET}s-Dial: Linguistic Entrainment in End-to-End Task-oriented Dialogue systems",
+    author = "Kumar, Nalin  and
+      Dusek, Ondrej",
+    editor = "Duh, Kevin  and
+      Gomez, Helena  and
+      Bethard, Steven",
+    booktitle = "Findings of the Association for Computational Linguistics: NAACL 2024",
+    month = jun,
+    year = "2024",
+    address = "Mexico City, Mexico",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2024.findings-naacl.46",
+    pages = "727--735",
+    abstract = "Linguistic entrainment, or alignment, represents a phenomenon where linguistic patterns employed by conversational participants converge to one another. While entrainment has been shown to produce a more natural user experience, most dialogue systems do not have any provisions for it. In this work, we introduce methods for achieving dialogue entrainment in a GPT-2-based end-to-end task-oriented dialogue system through the utilization of shared vocabulary. We experiment with training instance weighting, entrainment-specific loss, and additional conditioning to generate responses that align with the user. We demonstrate that all three approaches produce significantly better entrainment than the base, non-entrainment-optimized model, as confirmed by both automated and manual evaluation metrics.",
+}
 ```
 
 ## Getting started
