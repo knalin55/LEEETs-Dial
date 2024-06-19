@@ -28,13 +28,14 @@ def load_dataset(name, use_goal=False, context_window_size=15, domains=None, **k
 
     def transform(x):
         dialogue, items = x
+        user_input = items[-2]["text"]
         context = [s['text'] for s in items[:-1]]
         if context_window_size is not None and context_window_size > 0:
             context = context[-context_window_size:]
         belief = items[-1]['belief']
         database = items[-1]['database']
         item = DialogDatasetItem(context, raw_belief=belief, database=database,
-                                 response=items[-1]['delexicalised_text'], raw_response=items[-1]['text'])
+                                 response=items[-1]['delexicalised_text'], raw_response=items[-1]['text'], user_input=user_input)
         if use_goal:
             setattr(item, 'goal', dialogue['goal'])
             # MultiWOZ evaluation uses booked domains property
