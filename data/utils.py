@@ -1,5 +1,6 @@
 import re
 import random
+import math
 import copy
 import logging
 from typing import Callable, Union, Set, Optional, List, Dict, Any, Tuple, MutableMapping  # noqa: 401
@@ -9,6 +10,13 @@ from dataclasses import dataclass
 import torch
 from torch.nn.utils.rnn import pad_sequence
 import transformers
+import nltk
+from more_itertools import locate
+from nltk.corpus import stopwords
+import numpy as np
+
+stop_words = set(stopwords.words('english'))
+
 try:
     from tqdm import trange
 except(Exception):
@@ -28,6 +36,8 @@ class DialogDatasetItem:
     positive: bool = True
     raw_belief: Any = None
     raw_response: str = None
+    user_input: Union[List[str], str] = None
+    keywords: Union[List[str], str] = None
 
     def __getattribute__(self, name):
         val = object.__getattribute__(self, name)
@@ -44,6 +54,7 @@ class DataCollatorWithPadding:
     max_length: Optional[int] = None
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        max_len = max([len(x['response_labels']) for x in features])
         batch = {
             'consistency_labels': torch.tensor([x['consistency_labels'] for x in features], dtype=torch.float32),
             'consistency_token_ids': torch.tensor([x['consistency_token_ids'] for x in features], dtype=torch.int64),
@@ -53,21 +64,28 @@ class DataCollatorWithPadding:
                                           batch_first=True, padding_value=-100),
             'response_labels': pad_sequence([torch.tensor(x['response_labels'], dtype=torch.int64) for x in features],
                                             batch_first=True, padding_value=-100),
+            'user_labels': pad_sequence([torch.tensor(x['user_labels'], dtype=torch.int64) for x in features]+ [torch.empty(max_len)],
+                                            batch_first=True, padding_value=-100)[:-1, :max_len],
+            'belief_end': torch.tensor([x['belief_end'] for x in features], dtype=torch.int32),
+            'res_end': torch.tensor([x['res_end'] for x in features], dtype=torch.int32),
         }
         return batch
 
 
 class TokenizerTransformation:
-    def __init__(self, tokenizer: transformers.GPT2Tokenizer, max_context_length: int = 500):
-        self.bob, self.eob, self.eokb = tokenizer.convert_tokens_to_ids(
-            ['=>', '<|eob|>', '<|eokb|>'])
+    def __init__(self, tokenizer: transformers.GPT2Tokenizer, max_context_length: int = 500, add_keyword=None, alpha_blending=0.05):
+        self.bob, self.eob, self.eokb, self.eok = tokenizer.convert_tokens_to_ids(
+            ['=>', '<|eob|>', '<|eokb|>', '<|eok|>'])
         self.eos = tokenizer.eos_token_id
         self.tokenizer = tokenizer
         self.max_context_length = max_context_length
+        self.add_keyword = add_keyword
+        self.alpha_blending = alpha_blending
 
     def get_tokens(self, data):
-        history, belief, database = data.context, data.belief, data.database
+        history, belief, database, user, keywords = data.context, data.belief, data.database, data.user_input, data.keywords
         response, positive = data.response, data.positive
+
 
         # Add history
         history = self.tokenizer.encode(history)
@@ -90,34 +108,154 @@ class TokenizerTransformation:
             labels += [-100 for _ in database]
 
         database_end = len(labels)
+        
+        labels_user = labels.copy()
+        
+        """ def find_intersection(user, response):
+            tags = []
+
+            user_tags = [tag for word, tag in user]
+            response_tags = [tag for word, tag in response]
+
+            i, j = len(user_tags), 0
+            while i > 0:
+                interval = i
+                tag = user_tags[len(user_tags) - i]
+                if tag in response_tags:
+                    indices = locate(response_tags, lambda x: x==tag)
+                    for index in indices:
+                        j = 0
+                        for k in range(1, interval):
+                            if user_tags[i: i + k] == response_tags[index : index + k]:
+                                
+                                if len(tags) > k:
+                                    tags = user_tags[i: i + k]
+                                i -= 1
+                            else:
+
+                                break """
+
+############################################
+
+        def lcs(a, b):
+            tbl = [[0 for _ in range(len(b) + 1)] for _ in range(len(a) + 1)]
+            for i, x in enumerate(a):
+                for j, y in enumerate(b):
+                    tbl[i + 1][j + 1] = tbl[i][j] + 1 if x == y else max(
+                        tbl[i + 1][j], tbl[i][j + 1])
+            res = []
+            i, j = len(a), len(b)
+            while i and j:
+                if tbl[i][j] == tbl[i - 1][j]:
+                    i -= 1
+                elif tbl[i][j] == tbl[i][j - 1]:
+                    j -= 1
+                else:
+                    res.append(a[i - 1])
+                    i -= 1
+                    j -= 1
+            return res[::-1]
+
+###############################################
+
+        keyword_end = None
+        if self.add_keyword is not None or keywords is not None:
+            if keywords is None:
+                if self.add_keyword == "pos_tags-user_overlap" or self.add_keyword == "pos_tags-ground_truth":
+                    response_ = re.sub("[[*[a-z]*\s*[a-z]*]*]","", response)
+                    response_ = nltk.word_tokenize(response)
+                    response_ = [w.lower() for w in response_ if w.isalpha()] # Remove Punctuations 
+                    response_pos_tags = nltk.pos_tag(response_)
+
+                    if self.add_keyword == "pos_tags-user_overlap":
+                        user_ = nltk.word_tokenize(user)    
+                        
+                        user_ = [w.lower() for w in user_ if w.isalpha()] # Remove Punctuations 
+                        
+                        
+                        user_pos_tags = nltk.pos_tag(user_)
+
+                        keys = lcs([tag for w, tag in response_pos_tags], [tag for w, tag in user_pos_tags])
+                        
+                    elif self.add_keyword == "pos_tags-ground_truth":
+
+                        keys = [tag for w, tag in response_pos_tags]
+
+                if self.add_keyword == "lexicons-user_overlap" or self.add_keyword == "lexicons-ground_truth" or self.add_keyword == "lexicons-alpha_blending":
+                    
+                    if self.add_keyword == "lexicons-user_overlap":
+                        keys = [user_inp for user_inp in set(user.split()) if user_inp in response.split()]
+                    elif self.add_keyword == "lexicons-ground_truth":
+                        response = re.sub("[[*[a-z]*\s*[a-z]*]*]","", response)
+                        response_ = [w.lower() for w in nltk.word_tokenize(response) if w.isalpha()] 
+                        keys = [w for w in response_ if not w.lower() in stop_words]
+                    elif self.add_keyword == "lexicons-alpha_blending":
+                        overlap = [user_inp for user_inp in set(user.split()) if user_inp in response.split()]
+                        user_cleaned = [w.lower() for w in set(nltk.word_tokenize(user)) if w.isalpha()] 
+                        
+                        if np.random.uniform(0,1) <= self.alpha_blending:
+                            mean = 0.24
+                            sd = 0.16
+                            prob = np.random.normal(mean, sd)
+                            num_ind = max(math.floor((len(user_cleaned))*prob), 0)
+                            randices = np.random.choice(np.arange(len(user_cleaned)), num_ind, replace = False)
+                            keys = [user_cleaned[i] for i in randices]
+                        else:
+                            keys = overlap
+
+
+
+
+                keywords = self.tokenizer.encode("Keywords: "+str(", ".join(keys)) + " <|eok|> ")# + [self.tokenizer.convert_tokens_to_ids("<|eok|>")]
+                inp += keywords
+                labels += [-100 for _ in keywords]
+                keyword_end = len(labels)
+
+            else:
+                keywords = self.tokenizer.encode("Keywords: "+str(", ".join(keywords)) + " <|eok|> ")
+                inp += keywords
+                labels += [-100 for _ in keywords]
+                keyword_end = len(labels)
+
 
         # Add response
         if response is not None:
-            response = self.tokenizer.encode(response) + [self.eos]
+            response = self.tokenizer.encode(str(response)) + [self.eos]
             inp += response
             labels += response
+            labels_user += self.tokenizer.encode(re.sub("[,.!?]", "", user))
 
         if positive is not None and not positive:
             labels = [-100 for _ in labels]
+            labels_user = [-100 for _ in labels_user]
 
         if self.max_context_length > 0:
             old_length = len(inp)
             inp = inp[-self.max_context_length:]
+           
             labels = labels[-self.max_context_length:]
+            labels_user = labels_user[-self.max_context_length:]
+            
             belief_end = belief_end - (old_length - len(inp))
             context_end = context_end - (old_length - len(inp))
             database_end = database_end - (old_length - len(inp))
-        return inp, labels, positive, belief_end, context_end, database_end
+        
+        print(inp)
+        print(f"input: {self.tokenizer.batch_decode([inp])}\n")
+        print(f"labels: {self.tokenizer.batch_decode([labels])}\n")
+
+        return inp, labels, positive, belief_end, context_end, database_end, labels_user
 
     # -100 is mask token for LM
     # transforms into dict {"input_ids", "labels", "binary_labels", "binary_token_ids" }
     # binary_labels are used for task 3
     def __call__(self, data):
-        inp, labels, positive, belief_end, context_end, database_end = self.get_tokens(data)
+        inp, labels, positive, belief_end, context_end, database_end, labels_user = self.get_tokens(data)
         belief_labels = [x if i < belief_end else -100 for i, x in enumerate(labels)]
         response_labels = [x if i >= belief_end else -100 for i, x in enumerate(labels)]
-        return dict(input_ids=inp, belief_labels=belief_labels, response_labels=response_labels,
-                    consistency_labels=positive, consistency_token_ids=len(labels) - 1)
+        response_labels_user = [x if i >= belief_end else -100 for i, x in enumerate(labels_user)]
+        return dict(input_ids=inp, belief_labels=belief_labels, response_labels=response_labels, user_labels=response_labels_user,
+                    consistency_labels=positive, consistency_token_ids=len(labels) - 1, belief_end=belief_end, res_end=len(labels))
 
 
 def default_translate_match(n):
