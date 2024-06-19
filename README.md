@@ -2,7 +2,7 @@
 ![tests](https://github.com/ufal/augpt/workflows/tests/badge.svg)
 ## Update (LEEETs-Dial)
 Added several methods (Instance Weighting, User Likelihood Loss & Conditioning on Lexical Keywords) to improve user-system dialogue alignment.
-Head out to `experiments/experiments.md` to check their usage.
+Check out `experiments/experiments.md` to know more about the usage.
 Don't forget to cite our paper if you use our work. 
 
 ```
