@@ -8,6 +8,7 @@ import torch
 import transformers
 import zipfile
 from collections import OrderedDict
+from torcheval.metrics import MultilabelAccuracy
 
 # We will fix transformers remote url resolution for older transformer versions
 def _fix_transformers_url():
@@ -125,6 +126,33 @@ class LanguageAccuracy(Accuracy):
         shift_labels = labels[..., 1:].contiguous()
         super().update_state(
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+class DialogueAlignmentAccuracy(Metric):
+    def reset_states(self):
+        self.cummusum = 0.0
+        self.samples = 0.0
+    
+    def report(self):
+        if self.cummusum == 0:
+            return 0
+        return self.cummusum / self.samples
+
+    def update_state(self, lm_logits, user_labels, ignore_index=-100):
+        
+        lm_logits = lm_logits.detach()
+        user = user_labels.detach()
+
+        shift_logits = lm_logits[..., :-1, :].contiguous()
+        shift_labels = user[..., 1:].contiguous()
+        
+        pad_ind = (shift_labels == -100)
+
+        ptarget = shift_labels.unsqueeze(1).expand(shift_labels.size(0),shift_labels.size(1),shift_labels.size(1))
+        pt = torch.argmax(shift_logits, axis=-1).unsqueeze(-1).expand(shift_labels.size(0),shift_labels.size(1),shift_labels.size(1))
+        result = (pt == ptarget).sum(axis=-1)
+
+        self.cummusum += result[~pad_ind].sum()
+        self.samples += (~pad_ind).sum()
 
 
 class BinaryAccuracy(Mean):
