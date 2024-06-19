@@ -5,18 +5,20 @@ import os
 import argparse
 import transformers
 import torch
+import datasets
 from torch.nn.parallel import DistributedDataParallel
 from torchvision.transforms import Compose as ComposeTransformation
 import tensorboardX
 from tqdm import tqdm
 import wandb
 from pipelines import AuGPTConversationalPipeline
-from utils import Mean, LanguageAccuracy, BinaryAccuracy
+from utils import Mean, LanguageAccuracy, BinaryAccuracy, DialogueAlignmentAccuracy
 from utils import DistributedMetricsDict, setup_logging, pull_model, seed
 import data
 from model import AuGPTModel, add_custom_tokens, AuGPTConfig, AuGPTTokenizer
 from generate import sample_to_conversation, conversation_to_sample, format_samples
-
+from more_itertools import locate
+import numpy as np
 
 class TrainingPredictor:
     def __init__(self, pipeline, dataset, size=8, **kwargs):
@@ -46,16 +48,29 @@ class Trainer:
         self.train_dataloader, self.dev_dataloader = None, None
         self.dev_predictor = None
         self.optimizer, self.scheduler, self.global_step = None, None, 0
-        self.epoch = None
+        self.epoch = None 
         self.wandb_runid = None
         self.instance_weights = args.instance_weights
+        self.include_user_loss = args.include_user_loss
         self.sacrebleu = datasets.load_metric("sacrebleu", experiment_id=f"{args.response_loss}-{args.instance_weights}")
         self.dir_path = args.dir_path
+        self.add_keyword = args.add_keyword
+        self.rank_alpha_user = args.rank_alpha_user
+        self.save_best = args.save_best
+        self.include_unlikelihood = args.include_unlikelihood
+        self.alpha_blending = args.alpha_blending
+        self.score = 0.0
+
 
     def _initialize_logging(self):
         if self.is_master():
             # Initialize wandb and logging
-            wandb.init()
+            
+            if self.dir_path is not None:
+                wandb.init(dir=self.dir_path)
+            else:
+                wandb.init()
+
             wandb.config.update(self.args)
             self.tb_writer = tensorboardX.SummaryWriter(wandb.run.dir)
 
@@ -81,7 +96,7 @@ class Trainer:
 
     def _initialize_dataloaders(self) -> torch.utils.data.Dataset:
         transform = [data.InsertLabelsTransformation(),
-                     data.TokenizerTransformation(self.tokenizer)]
+                     data.TokenizerTransformation(self.tokenizer, add_keyword=self.add_keyword, alpha_blending=self.alpha_blending)]
         train_transform = list(transform)
 
         if self.args.backtranslations != 'none':
@@ -206,7 +221,7 @@ class Trainer:
     def _run_validation(self):
         metrics = dict(loss=Mean(), lm_loss=Mean(), c_loss=Mean(),
                        bs_loss=Mean(), res_loss=Mean(), bs_acc=LanguageAccuracy(),
-                       res_acc=LanguageAccuracy(), c_acc=BinaryAccuracy())
+                       res_acc=LanguageAccuracy(), c_acc=BinaryAccuracy(), align_acc=DialogueAlignmentAccuracy())
         if self.args.local_rank != -1:
             metrics = DistributedMetricsDict(**metrics)
         for _, batch in enumerate(tqdm(self.dev_dataloader,
@@ -236,6 +251,7 @@ class Trainer:
                 metrics['bs_acc'](output[4], batch['belief_labels'])
                 metrics['res_acc'](output[4], batch['response_labels'])
                 metrics['c_acc'](output[5], batch['consistency_labels'])
+                metrics['align_acc'](output[4], batch['user_labels'])
             _val_step(batch)
 
         # Need to reduce here for other processes
@@ -338,7 +354,7 @@ class Trainer:
 
         metrics = dict(loss=Mean(), lm_loss=Mean(), c_loss=Mean(),
                        bs_loss=Mean(), res_loss=Mean(), bs_acc=LanguageAccuracy(),
-                       res_acc=LanguageAccuracy(), c_acc=BinaryAccuracy())
+                       res_acc=LanguageAccuracy(), c_acc=BinaryAccuracy(), align_acc=DialogueAlignmentAccuracy())
         if self.args.local_rank != -1:
             metrics = DistributedMetricsDict(**metrics)
         if self.tb_writer:
@@ -353,8 +369,8 @@ class Trainer:
                 def _train_step(batch):
                     self.model.train()
                     instance_weights = None
-                    batch = {k: v.to(self.args.device) for k, v in batch.items()}
                     
+                    batch = {k: v.to(self.args.device) for k, v in batch.items()}
                     def get_instance_weights(batch):
                         instance_weights = []
                         for input_ids in batch["input_ids"]:
@@ -370,23 +386,61 @@ class Trainer:
                                     instance_weights.append(1.0)
                                 else:
                                     instance_weights.append(10.0)
-                            else:
-                                
-                                instance_weights.append(10/(1 + np.exp(0.8*(-results["precisions"][0]+18.1473))) + 0.1)
-                    
-                    if self.instance_weights is not None: instance_weights = get_instance_weights(batch)
 
-                    def forward(batch, instance_weights=instance_weights,):
-                        output = self.model(**batch, instance_weights=instance_weights,)
+                            elif self.instance_weights == "mod_sigmoid":
+                                instance_weights.append(10/(1 + np.exp(0.8*(-results["precisions"][0]+18.1473))) + 0.1)
+
+                            else:
+                                if results["precisions"][0] >= 50:
+                                    instance_weights.append(0.5)
+                                elif results["precisions"][0] >= 30 and results["precisions"][0] < 50:
+                                    instance_weights.append(0.4)
+                                elif results["precisions"][0] >= 20 and results["precisions"][0] < 30:
+                                    instance_weights.append(0.3)
+                                else:
+                                    instance_weights.append(0.2)
+                                
+
+                        return torch.tensor(instance_weights).to(self.args.device)
+                    
+                    if self.instance_weights == "mod_sigmoid" or self.instance_weights == "simple": instance_weights = get_instance_weights(batch)
+
+                    variable_key = None
+                    if self.instance_weights == "variable_key": variable_key = get_instance_weights(batch)
+                  
+                    def forward(batch, user_input_labels=False, instance_weights=instance_weights, tokenizer=None, rank_alpha_user=None, do_weighted_useroverlap=False, include_unlikelihood=False):
+                        output = self.model(
+                            **batch, 
+                            user_input_labels=user_input_labels, 
+                            instance_weights=instance_weights, 
+                            tokenizer=tokenizer, 
+                            rank_alpha_user=rank_alpha_user, 
+                            do_weighted_useroverlap=do_weighted_useroverlap,
+                            include_unlikelihood= include_unlikelihood)
+                            
                         belief_loss, response_loss, response_ce, consistency_loss = output[:4]
                         loss = belief_loss + response_loss + consistency_loss
                         return loss, output[:6]
+                    
+
+                    rank_alpha_user = variable_key if variable_key is not None else self.rank_alpha_user
+                    do_weighted_useroverlap = True if variable_key is not None else False
 
                     if self.args.fp16:
                         with torch.cuda.amp.autocast():
-                            loss, output = forward(batch)
+                            loss, output = forward(
+                                batch, 
+                                user_input_labels=self.include_user_loss, 
+                                rank_alpha_user=rank_alpha_user,
+                                do_weighted_useroverlap = do_weighted_useroverlap)
                     else:
-                        loss, output = forward(batch)
+                        loss, output = forward(
+                            batch, 
+                            user_input_labels=self.include_user_loss, 
+                            tokenizer=self.tokenizer, 
+                            rank_alpha_user=rank_alpha_user,
+                            do_weighted_useroverlap = do_weighted_useroverlap,
+                            include_unlikelihood = self.include_unlikelihood)
 
                     belief_loss, response_loss, response_ce, consistency_loss = output[:4]
                     loss = belief_loss + response_loss + consistency_loss
@@ -398,6 +452,7 @@ class Trainer:
                     metrics['bs_acc'](output[4], batch['belief_labels'])
                     metrics['res_acc'](output[4], batch['response_labels'])
                     metrics['c_acc'](output[5], batch['consistency_labels'])
+                    metrics['align_acc'](output[4], batch['user_labels'])
                     loss = loss / self.args.gradient_accumulation_steps
                     if self.args.fp16:
                         self.scaler.scale(loss).backward()
@@ -442,7 +497,7 @@ class Trainer:
                         self._run_validation()
 
             # Log learning rate for each epoch and save the checkpoint
-            self._run_validation()
+            metric_values_val = self._run_validation()
             self._run_prediction()
             if self.tb_writer:
                 self.tb_writer.add_scalar('lr', self.scheduler.get_last_lr()[0], self.global_step)
@@ -452,7 +507,13 @@ class Trainer:
                     'lr': self.scheduler.get_last_lr()[0],
                     'epoch': epoch
                 }, step=self.global_step)
-            self._save()
+            
+            if self.save_best:
+                if (metric_values_val["align_acc"] + metric_values_val["res_acc"])/2 >= self.score:
+                    self._save(epoch=epoch)
+                    self.score = (metric_values_val["align_acc"] + metric_values_val["res_acc"])/2
+            else:
+                self._save(epoch=epoch)
 
         # Publish the model to wandb
         # self._publish_artifact()
@@ -475,19 +536,26 @@ def parse_args():
     parser.add_argument('--num-beams', type=int, default=None)
     parser.add_argument('--max-norm', type=float, default=1.0)
     parser.add_argument('--warmup-steps', type=int, default=1000)
-    parser.add_argument('--batch-size', type=int, default=16)
+    parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--logging-steps', type=int, default=200)
-    parser.add_argument('--response-loss', choices=['unlikelihood', 'ce'], default=None)
+    parser.add_argument('--response-loss', choices=['unlikelihood', 'ce', 'user_overlap'], default=None)
     parser.add_argument('--evaluation-dialogs', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--validation-steps', type=int, default=2000)
     parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
-    parser.add_argument('--instance_weights', choices=['mod_sigmoid', 'simple'], default=None)
     parser.add_argument('--clean-samples', action='store_true')
     parser.add_argument('--restrict-domains', action='store_true')
     parser.add_argument('--backtranslations', type=str, default='none')
     parser.add_argument('--epochs', default=10, type=int)
+    parser.add_argument('--instance_weights', choices=['mod_sigmoid', 'simple', 'variable_key'], default=None)
+    parser.add_argument('--include_user_loss', action='store_true')
+    parser.add_argument('--dir_path', default=None, type=str)
+    parser.add_argument('--add_keyword', choices=['pos_tags-user_overlap', 'pos_tags-ground_truth', 'lexicons-user_overlap', 'lexicons-ground_truth', 'lexicons-alpha_blending'], default=None)
+    parser.add_argument('--rank_alpha_user', default=1.0, type=float)
+    parser.add_argument('--alpha_blending', default=0.05, type=float)
+    parser.add_argument('--save_best', action='store_true')
+    parser.add_argument('--include_unlikelihood', action='store_true')
 
     # Passed by the launch script
     local_rank_default = int(os.environ['LOCAL_RANK']) if 'LOCAL_RANK' in os.environ else -1
