@@ -59,7 +59,12 @@ class MultiWozEvaluator(BaseEvaluator):
         provided_requestables = defaultdict(lambda: set())
         venue_offered = defaultdict(lambda: [])
         for i, (belief, response, booked_domains) in enumerate(zip(beliefs, responses, dialog_booked_domains)):
-            database_results = self.db(belief, return_results=True)
+            #database_results = self.db(belief, return_results=True)
+            try:
+                database_results = self.db(belief, return_results=True)
+            except:
+                belief["train"].pop("people")
+                database_results = self.db(belief, return_results=True)
             current_requestables = set(self.label_regex.findall(response))
             self.logger.debug(response)
             current_domain = next(iter(belief.keys())) if belief else None
