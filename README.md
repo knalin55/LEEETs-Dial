@@ -1,6 +1,6 @@
 # LEEETs-Dial: Linguistic Entrainment in End-to-End Task-oriented Dialogue systems
 
-The repository contains implementations of several methods (Instance Weighting, User Likelihood Loss & Conditioning on Lexical Keywords) to improve user-system dialogue alignment using GPT2-based model.
+The repository contains implementations of `Instance Weighting`, `User Likelihood Loss` & `Conditioning on Lexical Keywords` to improve user-system dialogue alignment using GPT2-based model.
 Check out `experiments/experiments.md` to learn more about the usage.
 Don't forget to cite our paper if you use our work. 
 
