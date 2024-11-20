@@ -24,7 +24,7 @@ Don't forget to cite our paper if you use our work.
 ```
 [Link to the paper](https://aclanthology.org/2024.findings-naacl.46/)
 
-The code is based on [AuGPT][https://github.com/ufal/augpt]. To learn more about its installation and how to get started, please refer to the original repository at [AuGPT][https://github.com/ufal/augpt].
+The code is based on [AuGPT](https://github.com/ufal/augpt). To learn more about its installation and how to get started, please refer to the original repository at [AuGPT](https://github.com/ufal/augpt).
 
 Please cite the AuGPT paper using
 
